@@ -27,7 +27,7 @@ public class ScriptPanel extends JPanel {
     }
 }
 */
-
+/*
 package ui;
 
 import service.GrantService;
@@ -101,3 +101,107 @@ public class ScriptPanel extends JPanel {
         }
     }
 }
+
+ */
+
+package ui;
+
+import service.GrantService;
+import db.ConnectionFactory;
+import javax.swing.*;
+import java.awt.*;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.sql.*;
+
+public class ScriptPanel extends JPanel {
+
+    private JTextArea area;
+    private JComboBox<String> cbFiltroTipo, cbOpcoes;
+    private GrantService service = new GrantService();
+
+    public ScriptPanel() {
+        setLayout(new BorderLayout());
+
+        // Painel de Controles
+        JPanel pnlControles = new JPanel(new FlowLayout(FlowLayout.LEFT));
+
+        cbFiltroTipo = new JComboBox<>(new String[]{"GERAL", "POR USUARIO", "POR IP", "POR TIPO"});
+        cbOpcoes = new JComboBox<>();
+        cbOpcoes.setPreferredSize(new Dimension(150, 25));
+        cbOpcoes.setEnabled(false);
+
+        JButton btnGerar = new JButton("Gerar Script");
+        JButton btnExportar = new JButton("Salvar .sql");
+
+        pnlControles.add(new JLabel("Filtro:"));
+        pnlControles.add(cbFiltroTipo);
+        pnlControles.add(cbOpcoes);
+        pnlControles.add(btnGerar);
+        pnlControles.add(btnExportar);
+
+        area = new JTextArea();
+        area.setFont(new Font("Monospaced", Font.PLAIN, 13));
+
+        add(pnlControles, BorderLayout.NORTH);
+        add(new JScrollPane(area), BorderLayout.CENTER);
+
+        // Lógica para carregar opções conforme o tipo de filtro
+        cbFiltroTipo.addActionListener(e -> carregarOpcoesFiltro());
+
+        btnGerar.addActionListener(e -> {
+            String filtro = (String) cbFiltroTipo.getSelectedItem();
+            String valor = (String) cbOpcoes.getSelectedItem();
+
+            if (filtro.equals("GERAL")) {
+                area.setText(service.gerarScript(null, null));
+            } else {
+                String coluna = filtro.equals("POR USUARIO") ? "u.USERNAME" :
+                        filtro.equals("POR IP") ? "i.ENDERECO_GRANT" : "i.TIPO";
+                area.setText(service.gerarScript(coluna, valor));
+            }
+            area.setCaretPosition(0);
+        });
+
+        btnExportar.addActionListener(e -> exportar());
+    }
+
+    private void carregarOpcoesFiltro() {
+        String selecionado = (String) cbFiltroTipo.getSelectedItem();
+        cbOpcoes.removeAllItems();
+
+        if (selecionado.equals("GERAL")) {
+            cbOpcoes.setEnabled(false);
+            return;
+        }
+
+        cbOpcoes.setEnabled(true);
+        String sql = "";
+        if (selecionado.equals("POR USUARIO")) sql = "SELECT DISTINCT USERNAME FROM usuarios";
+        else if (selecionado.equals("POR IP")) sql = "SELECT DISTINCT ENDERECO_GRANT FROM enderecosip WHERE ENDERECO_GRANT IS NOT NULL";
+        else if (selecionado.equals("POR TIPO")) sql = "SELECT DISTINCT TIPO FROM enderecosip";
+
+        try (Connection conn = ConnectionFactory.getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                cbOpcoes.addItem(rs.getString(1));
+            }
+        } catch (SQLException ex) { ex.printStackTrace(); }
+    }
+
+    private void exportar() {
+        if (area.getText().isEmpty()) return;
+        JFileChooser chooser = new JFileChooser();
+        if (chooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
+            try (FileWriter fw = new FileWriter(chooser.getSelectedFile() + ".sql")) {
+                fw.write(area.getText());
+                JOptionPane.showMessageDialog(this, "Salvo!");
+            } catch (IOException ex) { ex.printStackTrace(); }
+        }
+    }
+}
+
+
+

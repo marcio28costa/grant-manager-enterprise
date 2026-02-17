@@ -17,6 +17,7 @@ public class MainFrame extends JFrame {
         tabs.addTab("Permissões", new PermissaoCrudPanel());
         tabs.addTab("Vínculos", new VinculoPanel());
         tabs.addTab("Gerar Script", new ScriptPanel());
+        tabs.addTab("Auditoria", new AuditoriaPanel());
 
         add(tabs, BorderLayout.CENTER);
     }
