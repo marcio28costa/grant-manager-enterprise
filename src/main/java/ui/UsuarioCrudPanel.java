@@ -204,7 +204,7 @@ public class UsuarioCrudPanel extends JPanel {
         gbc.gridx = 0; gbc.gridy = 0; pnlForm.add(new JLabel("Username:"), gbc);
         gbc.gridx = 1; pnlForm.add(txtUsername, gbc);
 
-        gbc.gridx = 0; gbc.gridy = 1; pnlForm.add(new JLabel("Senha (Texto Plano):"), gbc);
+        gbc.gridx = 0; gbc.gridy = 1; pnlForm.add(new JLabel("Senha (Tipo Hash):"), gbc);
         gbc.gridx = 1; pnlForm.add(txtPassword, gbc);
 
         gbc.gridx = 0; gbc.gridy = 2; pnlForm.add(new JLabel("Tipo de Perfil:"), gbc);

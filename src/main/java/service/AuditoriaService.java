@@ -6,6 +6,10 @@ import java.util.*;
 
 public class AuditoriaService {
 
+    /**
+     * Compara a base de gestão local com o servidor remoto.
+     * Gera script para criar usuários faltantes ou corrigir senhas (hashes) divergentes.
+     */
     public String executarAuditoria(String host, String porta, String user, String pass, String filtroColuna, String valorFiltro) {
         StringBuilder sb = new StringBuilder();
         String urlRemoto = "jdbc:mysql://" + host + ":" + porta + "/mysql?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
@@ -14,11 +18,13 @@ public class AuditoriaService {
             String versao = getMySQLVersion(connAudit);
             sb.append("-- SERVIDOR AUDITADO: ").append(host).append(" | VERSAO: ").append(versao).append("\n");
 
+            // Carrega o mapa de usuários do servidor remoto (User -> Lista de Hosts/Hashes)
             Map<String, List<RemoteUser>> mapAuditado = carregarUsuariosRemotos(connAudit);
+            // Carrega a lista de usuários da sua gestão local (banco Direitos)
             List<LocalUser> baseGestao = carregarBaseGestao(filtroColuna, valorFiltro);
 
             sb.append("-- --------------------------------------------------------------\n");
-            sb.append("-- SCRIPT DE SINCRONIZACAO (RESILIENTE A FALHAS)\n");
+            sb.append("-- SCRIPT DE SINCRONIZACAO (VALIDACAO DE SENHA HASH)\n");
             sb.append("-- --------------------------------------------------------------\n\n");
 
             for (LocalUser local : baseGestao) {
@@ -26,12 +32,14 @@ public class AuditoriaService {
                 List<RemoteUser> remotos = mapAuditado.get(local.user);
 
                 if (remotos != null) {
+                    // 1. Busca Match Exato (IP = IP)
                     for (RemoteUser r : remotos) {
                         if (local.host.equalsIgnoreCase(r.host)) {
                             melhorMatch = r;
                             break;
                         }
                     }
+                    // 2. Busca Abrangência (Se existe um '%' ou máscara que cubra o IP local)
                     if (melhorMatch == null && !isStrictHost(local.host)) {
                         for (RemoteUser r : remotos) {
                             if (hostAbrange(r.host, local.host)) {
@@ -43,15 +51,18 @@ public class AuditoriaService {
                 }
 
                 if (melhorMatch != null) {
+                    // VALIDACAO DE SENHA: Compara o PASS_SHA1 local com o authentication_string remoto
                     if (!local.pass.equalsIgnoreCase(melhorMatch.pass)) {
-                        sb.append("-- Ajustando senha: ").append(local.user).append("@").append(melhorMatch.host).append("\n");
+                        sb.append("-- Senha divergente detectada para: ").append(local.user).append("@").append(melhorMatch.host).append("\n");
                         sb.append(String.format("ALTER USER '%s'@'%s' IDENTIFIED WITH mysql_native_password AS '%s';\n\n",
                                 local.user, melhorMatch.host, local.pass));
                     } else {
-                        sb.append("-- Aderente: ").append(local.user).append("@").append(local.host).append("\n");
+                        sb.append("-- Aderente (Senha OK): ").append(local.user).append("@").append(local.host)
+                                .append(" (coberto por ").append(melhorMatch.host).append(")\n");
                     }
                 } else {
-                    sb.append("-- Criando acesso: ").append(local.user).append("@").append(local.host).append("\n");
+                    // Criação total se não houver match nem abrangência
+                    sb.append("-- Criando acesso inexistente: ").append(local.user).append("@").append(local.host).append("\n");
                     sb.append(String.format("CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED WITH mysql_native_password AS '%s';\n",
                             local.user, local.host, local.pass));
                     sb.append(String.format("ALTER USER '%s'@'%s' IDENTIFIED WITH mysql_native_password AS '%s';\n",
@@ -67,6 +78,9 @@ public class AuditoriaService {
         return sb.toString();
     }
 
+    /**
+     * Executa o script gerado no servidor remoto de forma resiliente.
+     */
     public String aplicarScriptRemoto(String host, String porta, String user, String pass, String script) {
         String urlRemoto = "jdbc:mysql://" + host + ":" + porta + "/mysql?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
         int sucessos = 0;
@@ -77,13 +91,13 @@ public class AuditoriaService {
 
             String[] comandos = script.split(";");
             for (String sql : comandos) {
+                // Remove comentários das linhas para processar apenas comandos SQL
                 String cmd = sql.replaceAll("(?m)^--.*", "").trim();
                 if (!cmd.isEmpty()) {
                     try {
                         stmt.execute(cmd);
                         sucessos++;
                     } catch (SQLException e) {
-                        // Se falhar, registra o erro e o comando, mas continua o loop
                         falhas.add("Erro no comando [" + cmd + "]: " + e.getMessage());
                     }
                 }
@@ -99,9 +113,8 @@ public class AuditoriaService {
                     resultado.append(f).append("\n");
                 }
             } else {
-                resultado.append("✨ Todos os comandos foram aplicados sem erros.");
+                resultado.append("✨ Todos os comandos aplicados com sucesso.");
             }
-
             return resultado.toString();
 
         } catch (SQLException e) {
@@ -123,6 +136,7 @@ public class AuditoriaService {
 
     private Map<String, List<RemoteUser>> carregarUsuariosRemotos(Connection conn) throws SQLException {
         Map<String, List<RemoteUser>> map = new HashMap<>();
+        // Query para buscar usuário, host e a string de autenticação (hash da senha)
         String sql = "SELECT user, host, authentication_string FROM mysql.user";
         try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
@@ -141,7 +155,9 @@ public class AuditoriaService {
                 "JOIN usuarios u ON da.ID_USER = u.ID " +
                 "JOIN enderecosip i ON da.ID_IP = i.ID " +
                 "JOIN permissoes p ON da.ID_GRANT = p.ID";
+
         if (filtroColuna != null && valorFiltro != null) sql += " WHERE " + filtroColuna + " = ?";
+
         try (Connection conn = ConnectionFactory.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
             if (filtroColuna != null && valorFiltro != null) stmt.setString(1, valorFiltro);
@@ -161,6 +177,7 @@ public class AuditoriaService {
         }
     }
 
+    // Classes auxiliares para mapeamento de dados
     private static class LocalUser {
         String user, host, pass, perm, extra;
         LocalUser(String u, String h, String p, String pr, String ex) {
@@ -170,6 +187,10 @@ public class AuditoriaService {
 
     private static class RemoteUser {
         String host, pass;
-        RemoteUser(String h, String p) { this.host = h; this.pass = p; }
+        RemoteUser(String h, String p) {
+            this.host = h;
+            // Garante que o hash não venha nulo para evitar NullPointerException na comparação
+            this.pass = (p != null) ? p : "";
+        }
     }
 }
