@@ -31,7 +31,7 @@ public class ProcessaUsuariosPanel extends JPanel {
 
         // 1. Fonte de Dados
         JPanel pnlFonte = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        pnlFonte.setBorder(BorderFactory.createTitledBorder("1. Banco Fonte (Lista de Lojas)"));
+        pnlFonte.setBorder(BorderFactory.createTitledBorder("1. Fonte de Lojas (Banco Central)"));
         txtHostCentral = new JTextField("localhost", 10);
         txtPortaCentral = new JTextField("3306", 4);
         txtUserCentral = new JTextField("root", 8);
@@ -72,14 +72,14 @@ public class ProcessaUsuariosPanel extends JPanel {
         pnlNorte.add(pnlFonte); pnlNorte.add(pnlPesquisa); pnlNorte.add(pnlPre); pnlNorte.add(pnlAudit);
         add(pnlNorte, BorderLayout.NORTH);
 
-        // --- GRID CENTRAL ---
+        // --- UI: GRID (CENTRO) ---
         model = new DefaultTableModel(new String[]{"Sel", "Empresa", "Loja", "IP", "Porta", "CNPJ"}, 0) {
             @Override public Class<?> getColumnClass(int c) { return c == 0 ? Boolean.class : String.class; }
         };
         tabelaLojas = new JTable(model);
         add(new JScrollPane(tabelaLojas), BorderLayout.CENTER);
 
-        // --- STATUS (SUL) ---
+        // --- UI: STATUS (SUL) ---
         JPanel pnlSul = new JPanel(new BorderLayout());
         areaStatus = new JTextArea(8, 20);
         barraProgresso = new JProgressBar();
@@ -137,7 +137,6 @@ public class ProcessaUsuariosPanel extends JPanel {
             barraProgresso.setMaximum(selecionados.size());
             barraProgresso.setValue(0);
 
-            // GARANTE QUE A TABELA DE LOG EXISTE ANTES DE COMEÇAR
             verificarCriarTabelaLog();
 
             ExecutorService executor = Executors.newFixedThreadPool(5);
@@ -171,7 +170,7 @@ public class ProcessaUsuariosPanel extends JPanel {
             }
 
             String resPre = aplicarScriptResiliente(conn, txtPreComandosArea.getText());
-            String scriptAcerto = gerarScriptAuditoria(conn, col, val);
+            String scriptAcerto = gerarScriptAuditoriaComInvasores(conn, col, val);
             String resAcerto = aplicarScriptResiliente(conn, scriptAcerto);
 
             gravarLogLocal(cnpj, nome, "SUCESSO", "PRE: " + resPre + " | ACERTO: " + resAcerto);
@@ -182,27 +181,61 @@ public class ProcessaUsuariosPanel extends JPanel {
         }
     }
 
-    private String gerarScriptAuditoria(Connection conn, String col, String val) throws SQLException {
+    private String gerarScriptAuditoriaComInvasores(Connection conn, String col, String val) throws SQLException {
         StringBuilder sb = new StringBuilder();
-        Map<String, List<String[]>> remotos = new HashMap<>();
-        try (Statement s = conn.createStatement(); ResultSet r = s.executeQuery("SELECT user, host, authentication_string FROM mysql.user")) {
-            while (r.next()) remotos.computeIfAbsent(r.getString(1), k -> new ArrayList<>()).add(new String[]{r.getString(2), r.getString(3)});
+
+        // 1. Mapeia TUDO o que existe na LOJA (User + Host) para identificar intrusos
+        Set<String> usuariosExcedentes = new HashSet<>();
+        try (Statement s = conn.createStatement();
+             ResultSet r = s.executeQuery("SELECT user, host FROM mysql.user")) {
+            while (r.next()) {
+                String u = r.getString(1);
+                // Ignora usuários internos padrão do MySQL
+                if (u.equals("mysql.session") || u.equals("mysql.sys") || u.equals("root") || u.equals("mysql.infoschema")) continue;
+                usuariosExcedentes.add(u + "@" + r.getString(2));
+            }
         }
+
+        // 2. Map para conferência de senhas (Hash de Autenticação)
+        Map<String, List<String[]>> dadosRemotos = new HashMap<>();
+        try (Statement s = conn.createStatement();
+             ResultSet r = s.executeQuery("SELECT user, host, authentication_string FROM mysql.user")) {
+            while (r.next()) {
+                dadosRemotos.computeIfAbsent(r.getString(1), k -> new ArrayList<>())
+                        .add(new String[]{r.getString(2), r.getString(3)});
+            }
+        }
+
+        // 3. Busca a Base de Gestão Local
         String sql = "SELECT u.USERNAME, u.PASS_SHA1, i.ENDERECO_GRANT, p.PERMISSAO, p.EXTRA FROM direito_acesso da " +
                 "JOIN usuarios u ON da.ID_USER = u.ID JOIN enderecosip i ON da.ID_IP = i.ID " +
                 "JOIN permissoes p ON da.ID_GRANT = p.ID";
         if (col != null) sql += " WHERE " + col + " = ?";
-        try (Connection cLoc = ConnectionFactory.getConnection(); PreparedStatement ps = cLoc.prepareStatement(sql)) {
+
+        try (Connection cLoc = ConnectionFactory.getConnection();
+             PreparedStatement ps = cLoc.prepareStatement(sql)) {
             if (col != null) ps.setString(1, val);
             ResultSet rs = ps.executeQuery();
+
             while (rs.next()) {
-                String u = rs.getString(1), h = rs.getString(3), p = rs.getString(2), perm = rs.getString(4), ex = rs.getString(5);
+                String u = rs.getString(1);
+                String h = rs.getString(3);
+                String p = rs.getString(2);
+                String perm = rs.getString(4);
+                String ex = rs.getString(5);
+
+                // Se o usuário da GESTÃO está na loja, removemos da lista de "Excedentes"
+                usuariosExcedentes.remove(u + "@" + h);
+
+                // Comparação de Senha/Criação
                 boolean existe = false;
-                if (remotos.containsKey(u)) {
-                    for (String[] r : remotos.get(u)) {
+                if (dadosRemotos.containsKey(u)) {
+                    for (String[] r : dadosRemotos.get(u)) {
                         if (r[0].equalsIgnoreCase(h)) {
                             existe = true;
-                            if (!r[1].equalsIgnoreCase(p)) sb.append("ALTER USER '").append(u).append("'@'").append(h).append("' IDENTIFIED WITH mysql_native_password AS '").append(p).append("';\n");
+                            if (!r[1].equalsIgnoreCase(p)) {
+                                sb.append("ALTER USER '").append(u).append("'@'").append(h).append("' IDENTIFIED WITH mysql_native_password AS '").append(p).append("';\n");
+                            }
                             break;
                         }
                     }
@@ -214,6 +247,15 @@ public class ProcessaUsuariosPanel extends JPanel {
                 }
             }
         }
+
+        // 4. Concatena os usuários EXCEDENTES (Não constam na gestão)
+        if (!usuariosExcedentes.isEmpty()) {
+            sb.append("\n-- # USUARIOS EXCEDENTES NA LOJA (NAO ESTAO NA GESTAO) #\n");
+            for (String intruso : usuariosExcedentes) {
+                sb.append("-- DESCONHECIDO: ").append(intruso).append("\n");
+            }
+        }
+
         return sb.toString();
     }
 
@@ -254,7 +296,7 @@ public class ProcessaUsuariosPanel extends JPanel {
                 "erros_detalhados TEXT)";
         try (Connection c = ConnectionFactory.getConnection(); Statement s = c.createStatement()) {
             s.execute(sql);
-        } catch (Exception e) { log("⚠️ Erro ao criar tabela de log: " + e.getMessage()); }
+        } catch (Exception e) { log("⚠️ Erro Tabela Log: " + e.getMessage()); }
     }
 
     private void gravarLogLocal(String cnpj, String nome, String status, String msg) {
